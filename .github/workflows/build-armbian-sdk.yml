@@ -16,9 +16,11 @@ jobs:
   build:
     runs-on: ubuntu-22.04
     steps:
-      # 1. 检出自定义配置仓库（根目录下的所有文件）
+      # 1. 检出自定义配置仓库（所有文件检出到根目录）
       - name: Checkout Custom Configs
         uses: actions/checkout@v4
+        with:
+          path: .  # 检出到当前工作目录（根目录）
 
       # 2. 检出 Armbian 官方编译库（路径为 armbian-build）
       - name: Checkout Armbian Build Framework
@@ -28,14 +30,20 @@ jobs:
           path: armbian-build
           ref: main
 
-      # 3. 安装编译依赖（使用绝对路径访问根目录的 scripts/requirements.sh）
+      # 3. 调试：检查工作目录结构（确认 scripts 目录是否存在）
+      - name: Debug Workspace
+        run: |
+          echo "当前工作目录: $(pwd)"
+          ls -la /github/workspace/
+
+      # 4. 安装编译依赖（使用绝对路径访问根目录的 scripts/requirements.sh）
       - name: Install Dependencies
         run: |
           cd armbian-build
           chmod +x /github/workspace/scripts/requirements.sh  # 确保脚本有执行权限
-          sudo /github/workspace/scripts/requirements.sh     # 使用绝对路径避免相对路径问题
+          sudo /github/workspace/scripts/requirements.sh     # 使用绝对路径
 
-      # 4. 注入自定义文件（直接使用根目录路径，复制到armbian-build/userpatches/）
+      # 5. 注入自定义文件（直接使用根目录路径，复制到armbian-build/userpatches/）
       - name: Inject Custom Userpatches
         run: |
           # 处理 u-boot 子目录
@@ -55,7 +63,7 @@ jobs:
           mkdir -p armbian-build/userpatches/configs
           cp -f /github/workspace/userpatches/configs/config-r3300l.conf armbian-build/userpatches/configs/
 
-      # 5. 执行无人值守编译
+      # 6. 执行无人值守编译
       - name: Build Armbian Image
         run: |
           cd armbian-build
@@ -68,13 +76,13 @@ jobs:
             KERNEL_CONFIGURE=no \
             COMPRESS_OUTPUTIMAGE=sha,gpg,xz
 
-      # 6. 整理编译产物
+      # 7. 整理编译产物
       - name: Organize Artifacts
         run: |
           mkdir -p output
           find armbian-build/output/images/ -type f \( -name "*.img.xz" -o -name "*.img.xz.sha" \) -exec cp {} output/ \;
 
-      # 7. 上传到 GitHub Releases
+      # 8. 上传到 GitHub Releases
       - name: Upload to Release
         uses: softprops/action-gh-release@v2
         with:
