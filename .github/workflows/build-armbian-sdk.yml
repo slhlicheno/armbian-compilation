@@ -1,97 +1,111 @@
-name: Build Armbian TVBox
+name: Build Armbian (Self-hosted U-Boot + DTB Overlay)
 
 on:
   workflow_dispatch:
     inputs:
-      board:
-        description: '设备名称 (如: r3300l)'
+      armbian_release:
+        description: "系统版本"
         required: true
-        default: 'r3300l'
-      release:
-        description: '系统版本 (jammy: Ubuntu 22.04, bookworm: Debian 12, noble: Ubuntu 24.04)'
+        type: choice
+        default: 'trixie'
+        options:
+          - bookworm
+          - trixie
+          - noble
+      kernel_branch:
+        description: "内核分支 (unifreq 源码)"
         required: true
-        default: 'jammy'
+        type: choice
+        default: "5.15.y"
+        options:
+          - 5.15.y
+          - 6.1.y
+          - 6.6.y
 
 jobs:
   build:
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-24.04
     steps:
-      # 1. 检出自定义配置仓库（默认检出至 /github/workspace/）
-      - name: Checkout Custom Configs
+      - name: 检出你的仓库
         uses: actions/checkout@v4
-        with:
-          # 确保检出所有分支和标签，避免浅克隆导致路径问题
-          fetch-depth: 0
 
-      # 2. 检出 Armbian 官方编译库（路径为 armbian-build）
-      - name: Checkout Armbian Build Framework
-        uses: actions/checkout@v4
-        with:
-          repository: armbian/build
-          path: armbian-build
-          ref: main
+      - name: 拉取 Armbian 官方构建镜像
+        run: docker pull ghcr.io/armbian/docker-armbian-build:armbian-ubuntu-noble-latest
 
-      # 3. 调试：检查 /github/workspace/ 目录结构（确认 scripts 目录存在）
-      - name: Debug Workspace
+      - name: 准备构建环境
         run: |
-          echo "当前工作目录: $(pwd)"
-          echo "/github/workspace/ 目录内容:"
-          ls -la /github/workspace/
+          git clone --depth=1 --branch=main https://github.com/armbian/build armbian-sdk
 
-      # 4. 安装编译依赖（使用相对路径访问根目录的 scripts/requirements.sh）
-      - name: Install Dependencies
+          # 复制你的自定义配置文件
+          mkdir -p armbian-sdk/userpatches/configs
+          cp userpatches/configs/config-r3300l.conf armbian-sdk/userpatches/configs/
+
+          # 复制 DTB overlay 文件
+          mkdir -p armbian-sdk/userpatches/overlay/boot/dtb/amlogic/s905lb-r3300l
+          cp userpatches/overlay/boot/dtb/amlogic/s905lb-r3300l/meson-gxl-s905x-p212.dtb armbian-sdk/userpatches/overlay/boot/dtb/amlogic/s905lb-r3300l/
+
+          # 复制预编译 U-Boot 文件
+          mkdir -p armbian-sdk/userpatches/u-boot/amlogic/s905lb-r3300l
+          cp userpatches/u-boot/amlogic/s905lb-r3300l/u-boot-r3300l.bin armbian-sdk/userpatches/u-boot/amlogic/s905lb-r3300l/
+          cp userpatches/u-boot/amlogic/s905lb-r3300l/r3300l-u-boot.bin.sd.bin armbian-sdk/userpatches/u-boot/amlogic/s905lb-r3300l/
+
+          # 复制 U-Boot 劫持脚本
+          mkdir -p armbian-sdk/userpatches/lib
+          cp userpatches/lib/compilation_u-boot.sh armbian-sdk/userpatches/lib/
+
+          echo "✅ 所有自定义文件已就位"
+
+      - name: 配置宿主机的 QEMU 支持
         run: |
-          cd armbian-build
-          # 确保脚本有执行权限
-          chmod +x /github/workspace/scripts/requirements.sh
-          # 使用绝对路径执行依赖脚本
-          sudo /github/workspace/scripts/requirements.sh
+          sudo apt-get update
+          sudo apt-get install -y qemu-user-static
+          sudo modprobe binfmt_misc 2>/dev/null || true
+          sudo mount -t binfmt_misc binfmt_misc /proc/sys/fs/binfmt_misc 2>/dev/null || true
+          if [ ! -f /proc/sys/fs/binfmt_misc/qemu-aarch64 ]; then
+            echo ':qemu-aarch64:M::\x7fELF\x02\x01\x01\x00\x00\x00\x00\x00\x00\x00\x00\x00\x02\x00\xb7\x00:\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xfe\xff\xff\xff:/usr/bin/qemu-aarch64-static:F' | sudo tee /proc/sys/fs/binfmt_misc/register
+          fi
 
-      # 5. 注入自定义文件（直接使用根目录路径，复制到 armbian-build/userpatches/）
-      - name: Inject Custom Userpatches
-        run: |
-          # 处理 u-boot 子目录
-          mkdir -p armbian-build/userpatches/u-boot/amlogic/s905lb-r3300l
-          cp -f /github/workspace/userpatches/u-boot/amlogic/s905lb-r3300l/r3300l-u-boot.bin.sd.bin armbian-build/userpatches/u-boot/amlogic/s905lb-r3300l/
-          cp -f /github/workspace/userpatches/u-boot/amlogic/s905lb-r3300l/u-boot-r3300l.bin armbian-build/userpatches/u-boot/amlogic/s905lb-r3300l/
-
-          # 处理 overlay 子目录
-          mkdir -p armbian-build/userpatches/overlay/boot/dtb/amlogic/s905lb-r3300l
-          cp -f /github/workspace/userpatches/overlay/boot/dtb/amlogic/s905lb-r3300l/meson-gxl-s905x-p212.dtb armbian-build/userpatches/overlay/boot/dtb/amlogic/s905lb-r3300l/
-
-          # 处理 lib 子目录
-          mkdir -p armbian-build/userpatches/lib
-          cp -f /github/workspace/userpatches/lib/compilation_u-boot.sh armbian-build/userpatches/lib/
-
-          # 处理 configs 子目录
-          mkdir -p armbian-build/userpatches/configs
-          cp -f /github/workspace/userpatches/configs/config-r3300l.conf armbian-build/userpatches/configs/
-
-      # 6. 执行无人值守编译
-      - name: Build Armbian Image
-        run: |
-          cd armbian-build
-          ./compile.sh \
-            BOARD=${{ github.event.inputs.board }} \
-            BRANCH=legacy \
-            RELEASE=${{ github.event.inputs.release }} \
-            BUILD_MINIMAL=no \
-            BUILD_DESKTOP=no \
-            KERNEL_CONFIGURE=no \
-            COMPRESS_OUTPUTIMAGE=sha,gpg,xz
-
-      # 7. 整理编译产物
-      - name: Organize Artifacts
+      - name: 完整构建（内核 + RootFS + 打包）
         run: |
           mkdir -p output
-          find armbian-build/output/images/ -type f \( -name "*.img.xz" -o -name "*.img.xz.sha" \) -exec cp {} output/ \;
+          docker run --rm --privileged \
+            -v "$PWD/armbian-sdk":/armbian \
+            -v "$PWD/output":/armbian/output \
+            -e ALLOW_ROOT=yes \
+            ghcr.io/armbian/docker-armbian-build:armbian-ubuntu-noble-latest \
+            /bin/bash -c "
+              cd /armbian
+              # 加载 U-Boot 劫持脚本
+              source userpatches/lib/compilation_u-boot.sh
+              echo '>> 开始完整构建...'
+              ./compile.sh \
+                BOARD=r3300l \
+                BRANCH=current \
+                RELEASE=${{ inputs.armbian_release }} \
+                KERNELSOURCE=https://github.com/unifreq/linux-${{ inputs.kernel_branch }} \
+                KERNELBRANCH=${{ inputs.kernel_branch }} \
+                BUILD_MINIMAL=yes \
+                BUILD_DESKTOP=no \
+                KERNEL_CONFIGURE=no \
+                docker=no
+            "
 
-      # 8. 上传到 GitHub Releases
-      - name: Upload to Release
-        uses: softprops/action-gh-release@v2
+      - name: 收集镜像并上传
+        run: |
+          mkdir -p output-final
+          cp output/images/*.img.xz output-final/ 2>/dev/null || true
+          cp output/images/*.img.gz output-final/ 2>/dev/null || true
+          echo "✅ 镜像已收集"
+
+      - name: 上传到 Release
+        uses: ncipollo/release-action@main
         with:
-          tag_name: ${{ github.event.inputs.board }}-${{ github.event.inputs.release }}-${{ github.run_number }}
-          name: Armbian for ${{ github.event.inputs.board }} (${{ github.event.inputs.release }})
-          files: output/*
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          tag: "Armbian-${{ inputs.armbian_release }}-r3300l-${{ inputs.kernel_branch }}"
+          artifacts: "output-final/*.img.*"
+          allowUpdates: true
+          token: ${{ secrets.GITHUB_TOKEN }}
+          body: |
+            📦 Armbian (自定义 U-Boot + DTB)
+            - 设备: R3300L
+            - 内核: unifreq/linux-${{ inputs.kernel_branch }}
+            - 系统: ${{ inputs.armbian_release }}
