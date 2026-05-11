@@ -28,31 +28,32 @@ jobs:
           path: armbian-build
           ref: main
 
-      # 3. 安装编译依赖（使用根目录下的 scripts/requirements.sh）
+      # 3. 安装编译依赖（使用绝对路径访问根目录的 scripts/requirements.sh）
       - name: Install Dependencies
         run: |
           cd armbian-build
-          sudo ../scripts/requirements.sh
+          chmod +x /github/workspace/scripts/requirements.sh  # 确保脚本有执行权限
+          sudo /github/workspace/scripts/requirements.sh     # 使用绝对路径避免相对路径问题
 
-      # 4. 注入自定义文件（复制userpatches下的所有子目录和文件到armbian-build/userpatches/）
+      # 4. 注入自定义文件（直接使用根目录路径，复制到armbian-build/userpatches/）
       - name: Inject Custom Userpatches
         run: |
           # 处理 u-boot 子目录
           mkdir -p armbian-build/userpatches/u-boot/amlogic/s905lb-r3300l
-          cp -f ../userpatches/u-boot/amlogic/s905lb-r3300l/r3300l-u-boot.bin.sd.bin armbian-build/userpatches/u-boot/amlogic/s905lb-r3300l/
-          cp -f ../userpatches/u-boot/amlogic/s905lb-r3300l/u-boot-r3300l.bin armbian-build/userpatches/u-boot/amlogic/s905lb-r3300l/
+          cp -f /github/workspace/userpatches/u-boot/amlogic/s905lb-r3300l/r3300l-u-boot.bin.sd.bin armbian-build/userpatches/u-boot/amlogic/s905lb-r3300l/
+          cp -f /github/workspace/userpatches/u-boot/amlogic/s905lb-r3300l/u-boot-r3300l.bin armbian-build/userpatches/u-boot/amlogic/s905lb-r3300l/
 
           # 处理 overlay 子目录
           mkdir -p armbian-build/userpatches/overlay/boot/dtb/amlogic/s905lb-r3300l
-          cp -f ../userpatches/overlay/boot/dtb/amlogic/s905lb-r3300l/meson-gxl-s905x-p212.dtb armbian-build/userpatches/overlay/boot/dtb/amlogic/s905lb-r3300l/
+          cp -f /github/workspace/userpatches/overlay/boot/dtb/amlogic/s905lb-r3300l/meson-gxl-s905x-p212.dtb armbian-build/userpatches/overlay/boot/dtb/amlogic/s905lb-r3300l/
 
           # 处理 lib 子目录
           mkdir -p armbian-build/userpatches/lib
-          cp -f ../userpatches/lib/compilation_u-boot.sh armbian-build/userpatches/lib/
+          cp -f /github/workspace/userpatches/lib/compilation_u-boot.sh armbian-build/userpatches/lib/
 
           # 处理 configs 子目录
           mkdir -p armbian-build/userpatches/configs
-          cp -f ../userpatches/configs/config-r3300l.conf armbian-build/userpatches/configs/
+          cp -f /github/workspace/userpatches/configs/config-r3300l.conf armbian-build/userpatches/configs/
 
       # 5. 执行无人值守编译
       - name: Build Armbian Image
@@ -78,4 +79,7 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ github.event.inputs.board }}-${{ github.event.inputs.release }}-${{ github.run_number }}
-          name: Armbian for ${{ github.event.inputs.board }} ($
+          name: Armbian for ${{ github.event.inputs.board }} (${{ github.event.inputs.release }})
+          files: output/*
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
