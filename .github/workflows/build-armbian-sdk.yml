@@ -36,22 +36,34 @@ jobs:
         run: |
           git clone --depth=1 --branch=main https://github.com/armbian/build armbian-sdk
 
-          # 复制你的自定义配置文件
-          mkdir -p armbian-sdk/userpatches/configs
-          cp userpatches/configs/config-r3300l.conf armbian-sdk/userpatches/configs/
-
-          # 复制 DTB overlay 文件
+          # 复制 DTB overlay 文件 (按照你提供的目录结构)
           mkdir -p armbian-sdk/userpatches/overlay/boot/dtb/amlogic/s905lb-r3300l
-          cp userpatches/overlay/boot/dtb/amlogic/s905lb-r3300l/meson-gxl-s905x-p212.dtb armbian-sdk/userpatches/overlay/boot/dtb/amlogic/s905lb-r3300l/
+          if [ -f "userpatches/overlay/boot/dtb/amlogic/s905lb-r3300l/meson-gxl-s905x-p212.dtb" ]; then
+            cp userpatches/overlay/boot/dtb/amlogic/s905lb-r3300l/meson-gxl-s905x-p212.dtb armbian-sdk/userpatches/overlay/boot/dtb/amlogic/s905lb-r3300l/
+            echo "✅ 自定义 DTB 已复制"
+          else
+            echo "⚠️ 未找到自定义 DTB"
+          fi
 
-          # 复制预编译 U-Boot 文件
+          # 复制预编译 U-Boot 文件 (按照你提供的目录结构)
           mkdir -p armbian-sdk/userpatches/u-boot/amlogic/s905lb-r3300l
-          cp userpatches/u-boot/amlogic/s905lb-r3300l/u-boot-r3300l.bin armbian-sdk/userpatches/u-boot/amlogic/s905lb-r3300l/
-          cp userpatches/u-boot/amlogic/s905lb-r3300l/r3300l-u-boot.bin.sd.bin armbian-sdk/userpatches/u-boot/amlogic/s905lb-r3300l/
+          if [ -d "userpatches/u-boot/amlogic/s905lb-r3300l" ] && [ "$(ls -A userpatches/u-boot/amlogic/s905lb-r3300l 2>/dev/null)" ]; then
+            cp -a userpatches/u-boot/amlogic/s905lb-r3300l/* armbian-sdk/userpatches/u-boot/amlogic/s905lb-r3300l/
+            echo "✅ 预编译 U-Boot 已就位"
+          else
+            echo "❌ 未找到预编译 U-Boot 文件"
+            exit 1
+          fi
 
           # 复制 U-Boot 劫持脚本
           mkdir -p armbian-sdk/userpatches/lib
-          cp userpatches/lib/compilation_u-boot.sh armbian-sdk/userpatches/lib/
+          if [ -f "userpatches/lib/compilation_u-boot.sh" ]; then
+            cp userpatches/lib/compilation_u-boot.sh armbian-sdk/userpatches/lib/
+            echo "✅ U-Boot 劫持脚本已就位"
+          else
+            echo "❌ 缺少 U-Boot 劫持脚本"
+            exit 1
+          fi
 
           echo "✅ 所有自定义文件已就位"
 
@@ -65,7 +77,7 @@ jobs:
             echo ':qemu-aarch64:M::\x7fELF\x02\x01\x01\x00\x00\x00\x00\x00\x00\x00\x00\x00\x02\x00\xb7\x00:\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xfe\xff\xff\xff:/usr/bin/qemu-aarch64-static:F' | sudo tee /proc/sys/fs/binfmt_misc/register
           fi
 
-      - name: 完整构建（内核 + RootFS + 打包）
+      - name: 完整构建 (内核 + RootFS + 打包)
         run: |
           mkdir -p output
           docker run --rm --privileged \
@@ -78,8 +90,9 @@ jobs:
               # 加载 U-Boot 劫持脚本
               source userpatches/lib/compilation_u-boot.sh
               echo '>> 开始完整构建...'
+              # 使用 odroidn2 作为基础板子 (SDK 原生支持)
               ./compile.sh \
-                BOARD=r3300l \
+                BOARD=odroidn2 \
                 BRANCH=current \
                 RELEASE=${{ inputs.armbian_release }} \
                 KERNELSOURCE=https://github.com/unifreq/linux-${{ inputs.kernel_branch }} \
