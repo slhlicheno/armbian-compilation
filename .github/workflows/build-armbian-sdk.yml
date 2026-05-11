@@ -81,4 +81,6 @@ jobs:
         with:
           tag_name: ${{ github.event.inputs.board }}-${{ github.event.inputs.release }}-${{ github.run_number }}
           name: Armbian for ${{ github.event.inputs.board }} (${{ github.event.inputs.release }})
-          files
+          files: output/*
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
