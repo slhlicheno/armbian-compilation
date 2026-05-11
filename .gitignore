@@ -1,1 +1,9 @@
-
+# 严禁将编译产物提交
+     output/
+     cache/
+     *.img
+     *.img.xz
+     *.7z
+     *.zip
+     .DS_Store
+     
