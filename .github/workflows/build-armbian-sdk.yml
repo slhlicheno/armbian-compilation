@@ -1,0 +1,84 @@
+name: Build Armbian TVBox
+
+on:
+  workflow_dispatch:
+    inputs:
+      board:
+        description: '设备名称 (如: r3300l)'
+        required: true
+        default: 'r3300l'
+      release:
+        description: '系统版本 (jammy: Ubuntu 22.04, bookworm: Debian 12, noble: Ubuntu 24.04)'
+        required: true
+        default: 'jammy'
+
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+    steps:
+      # 1. 拉取你的配置仓库
+      - name: Checkout Custom Configs
+        uses: actions/checkout@v4
+
+      # 2. 拉取 Armbian 官方编译库
+      - name: Checkout Armbian Build Framework
+        uses: actions/checkout@v4
+        with:
+          repository: armbian/build
+          path: armbian-build
+          ref: main
+
+      # 3. 安装编译依赖
+      - name: Install Dependencies
+        run: |
+          sudo apt-get update
+          cd armbian-build
+          sudo ./scripts/requirements.sh
+
+      # 4. 注入你的自定义文件 (劫持脚本、U-Boot、DTB、配置文件)
+      - name: Inject Custom Userpatches
+        run: |
+          # 复制劫持脚本
+          mkdir -p armbian-build/userpatches/lib
+          cp -f userpatches/lib/compilation_u-boot.sh armbian-build/userpatches/lib/
+          chmod +x armbian-build/userpatches/lib/compilation_u-boot.sh
+
+          # 复制板卡配置文件
+          mkdir -p armbian-build/userpatches/configs
+          cp -f userpatches/configs/*.conf armbian-build/userpatches/configs/
+
+          # 复制预编译的 U-Boot 文件
+          mkdir -p armbian-build/userpatches/u-boot
+          cp -r userpatches/u-boot/* armbian-build/userpatches/u-boot/
+
+          # 复制 DTB 覆盖文件
+          mkdir -p armbian-build/userpatches/overlay
+          cp -r userpatches/overlay/* armbian-build/userpatches/overlay/
+
+      # 5. 执行无人值守编译
+      - name: Build Armbian Image
+        run: |
+          cd armbian-build
+          ./compile.sh \
+            BOARD=${{ github.event.inputs.board }} \
+            BRANCH=legacy \
+            RELEASE=${{ github.event.inputs.release }} \
+            BUILD_MINIMAL=no \
+            BUILD_DESKTOP=no \
+            KERNEL_CONFIGURE=no \
+            COMPRESS_OUTPUTIMAGE=sha,gpg,xz
+
+      # 6. 整理编译产物
+      - name: Organize Artifacts
+        run: |
+          mkdir -p output
+          # 查找编译出的镜像并移动到 output 目录
+          find armbian-build/output/images/ -type f \( -name "*.img.xz" -o -name "*.img.xz.sha" \) -exec cp {} output/ \;
+
+      # 7. 上传到 GitHub Releases
+      - name: Upload to Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.event.inputs.board }}-${{ github.event.inputs.release }}-${{ github.run_number }}
+          name: Armbian for ${{ github.event.inputs.board }} (${{ github.event.inputs.release }})
+          files
