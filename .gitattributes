@@ -1,0 +1,10 @@
+     # 强制所有 Shell 脚本使用 LF 换行符
+     *.sh text eol=lf
+     # 强制 YAML 文件使用 LF 换行符
+     *.yml text eol=lf
+     *.yaml text eol=lf
+     # 二进制文件禁止修改
+     *.dtb binary
+     *.bin binary
+     *.img binary
+     
