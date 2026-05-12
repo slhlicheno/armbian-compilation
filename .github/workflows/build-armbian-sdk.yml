@@ -1,4 +1,4 @@
-name: Build Armbian (Self-hosted U-Boot + DTB Overlay)
+name: Build Armbian (Fully Self-Hosted)
 
 on:
   workflow_dispatch:
@@ -13,7 +13,7 @@ on:
           - trixie
           - noble
       kernel_branch:
-        description: "内核分支 (unifreq 源码)"
+        description: "内核分支 (unifreq 仓库)"
         required: true
         type: choice
         default: "5.15.y"
@@ -26,99 +26,121 @@ jobs:
   build:
     runs-on: ubuntu-24.04
     steps:
-      - name: 检出你的仓库
+      - name: 检出你的仓库 (获取 DTB 和 U-Boot)
         uses: actions/checkout@v4
 
-      - name: 拉取 Armbian 官方构建镜像
-        run: docker pull ghcr.io/armbian/docker-armbian-build:armbian-ubuntu-noble-latest
-
-      - name: 准备构建环境
-        run: |
-          git clone --depth=1 --branch=main https://github.com/armbian/build armbian-sdk
-
-          # 复制 DTB overlay 文件 (按照你提供的目录结构)
-          mkdir -p armbian-sdk/userpatches/overlay/boot/dtb/amlogic/s905lb-r3300l
-          if [ -f "userpatches/overlay/boot/dtb/amlogic/s905lb-r3300l/meson-gxl-s905x-p212.dtb" ]; then
-            cp userpatches/overlay/boot/dtb/amlogic/s905lb-r3300l/meson-gxl-s905x-p212.dtb armbian-sdk/userpatches/overlay/boot/dtb/amlogic/s905lb-r3300l/
-            echo "✅ 自定义 DTB 已复制"
-          else
-            echo "⚠️ 未找到自定义 DTB"
-          fi
-
-          # 复制预编译 U-Boot 文件 (按照你提供的目录结构)
-          mkdir -p armbian-sdk/userpatches/u-boot/amlogic/s905lb-r3300l
-          if [ -d "userpatches/u-boot/amlogic/s905lb-r3300l" ] && [ "$(ls -A userpatches/u-boot/amlogic/s905lb-r3300l 2>/dev/null)" ]; then
-            cp -a userpatches/u-boot/amlogic/s905lb-r3300l/* armbian-sdk/userpatches/u-boot/amlogic/s905lb-r3300l/
-            echo "✅ 预编译 U-Boot 已就位"
-          else
-            echo "❌ 未找到预编译 U-Boot 文件"
-            exit 1
-          fi
-
-          # 复制 U-Boot 劫持脚本
-          mkdir -p armbian-sdk/userpatches/lib
-          if [ -f "userpatches/lib/compilation_u-boot.sh" ]; then
-            cp userpatches/lib/compilation_u-boot.sh armbian-sdk/userpatches/lib/
-            echo "✅ U-Boot 劫持脚本已就位"
-          else
-            echo "❌ 缺少 U-Boot 劫持脚本"
-            exit 1
-          fi
-
-          echo "✅ 所有自定义文件已就位"
-
-      - name: 配置宿主机的 QEMU 支持
+      - name: 安装编译和打包依赖
         run: |
           sudo apt-get update
-          sudo apt-get install -y qemu-user-static
-          sudo modprobe binfmt_misc 2>/dev/null || true
-          sudo mount -t binfmt_misc binfmt_misc /proc/sys/fs/binfmt_misc 2>/dev/null || true
-          if [ ! -f /proc/sys/fs/binfmt_misc/qemu-aarch64 ]; then
-            echo ':qemu-aarch64:M::\x7fELF\x02\x01\x01\x00\x00\x00\x00\x00\x00\x00\x00\x00\x02\x00\xb7\x00:\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xfe\xff\xff\xff:/usr/bin/qemu-aarch64-static:F' | sudo tee /proc/sys/fs/binfmt_misc/register
+          sudo apt-get install -y \
+            build-essential flex bison libssl-dev bc kmod cpio \
+            gcc-aarch64-linux-gnu \
+            xz-utils wget curl \
+            qemu-user-static debootstrap
+
+      # ========== 阶段1：编译内核 ==========
+      - name: 克隆内核源码
+        run: |
+          git clone --depth=1 --branch=${{ inputs.kernel_branch }} https://github.com/unifreq/linux-${{ inputs.kernel_branch }}.git linux-kernel
+
+      - name: 编译内核
+        run: |
+          cd linux-kernel
+          # 使用 ophub 默认配置
+          curl -fsSL https://raw.githubusercontent.com/ophub/amlogic-s9xxx-armbian/main/build-armbian/armbian-files/platform-files/amlogic/bootfs/boot/config-5.15.y -o .config || true
+          if [ ! -s .config ]; then
+            make ARCH=arm64 defconfig
+          fi
+          make ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- olddefconfig
+          make ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- -j$(nproc) Image modules dtbs
+
+      # ========== 阶段2：自建 rootfs ==========
+      - name: 构建根文件系统
+        run: |
+          sudo debootstrap --arch=arm64 ${{ inputs.armbian_release }} /tmp/rootfs http://deb.debian.org/debian
+          # 设置主机名和密码
+          echo "r3300l" | sudo tee /tmp/rootfs/etc/hostname
+          echo "root:1234" | sudo chroot /tmp/rootfs /usr/sbin/chpasswd
+
+      # ========== 阶段3：组装镜像 ==========
+      - name: 创建并组装最终镜像
+        run: |
+          # 创建 4GB 空白镜像
+          dd if=/dev/zero of=final.img bs=1M count=4096
+          sudo parted final.img --script mklabel msdos
+          sudo parted final.img --script mkpart primary fat32 1 256
+          sudo parted final.img --script mkpart primary ext4 256 100%
+          LOOP_DEV=$(sudo losetup -fP --show final.img)
+          sudo partprobe "$LOOP_DEV" || true
+          sleep 2
+          sudo mkfs.vfat "${LOOP_DEV}p1"
+          sudo mkfs.ext4 "${LOOP_DEV}p2"
+
+          sudo mkdir -p /mnt/boot /mnt/root
+          sudo mount "${LOOP_DEV}p1" /mnt/boot
+          sudo mount "${LOOP_DEV}p2" /mnt/root
+
+          # 复制根文件系统
+          sudo cp -a /tmp/rootfs/* /mnt/root/
+
+          # 安装内核模块
+          cd linux-kernel
+          sudo make ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- INSTALL_MOD_PATH=/mnt/root modules_install
+
+          # 复制内核和 DTB 到 boot 分区
+          sudo cp arch/arm64/boot/Image /mnt/boot/vmlinuz-${{ inputs.kernel_branch }}
+          sudo mkdir -p /mnt/boot/dtb/amlogic
+          # 复制你仓库里的自定义 DTB
+          if [ -f "${{ github.workspace }}/userpatches/overlay/boot/dtb/amlogic/s905lb-r3300l/meson-gxl-s905x-p212.dtb" ]; then
+            sudo cp ${{ github.workspace }}/userpatches/overlay/boot/dtb/amlogic/s905lb-r3300l/meson-gxl-s905x-p212.dtb /mnt/boot/dtb/amlogic/
+          else
+            # 如果没有自定义 DTB，使用内核编译出的默认 DTB
+            sudo cp arch/arm64/boot/dts/amlogic/meson-gxl-s905x-p212.dtb /mnt/boot/dtb/amlogic/ 2>/dev/null || echo "⚠️ 未找到 DTB"
           fi
 
-      - name: 完整构建 (内核 + RootFS + 打包)
-        run: |
-          mkdir -p output
-          docker run --rm --privileged \
-            -v "$PWD/armbian-sdk":/armbian \
-            -v "$PWD/output":/armbian/output \
-            -e ALLOW_ROOT=yes \
-            ghcr.io/armbian/docker-armbian-build:armbian-ubuntu-noble-latest \
-            /bin/bash -c "
-              cd /armbian
-              # 加载 U-Boot 劫持脚本
-              source userpatches/lib/compilation_u-boot.sh
-              echo '>> 开始完整构建...'
-              # 使用 odroidn2 作为基础板子 (SDK 原生支持)
-              ./compile.sh \
-                BOARD=odroidn2 \
-                BRANCH=current \
-                RELEASE=${{ inputs.armbian_release }} \
-                KERNELSOURCE=https://github.com/unifreq/linux-${{ inputs.kernel_branch }} \
-                KERNELBRANCH=${{ inputs.kernel_branch }} \
-                BUILD_MINIMAL=yes \
-                BUILD_DESKTOP=no \
-                KERNEL_CONFIGURE=no \
-                docker=no
-            "
+          # 注入 U-Boot (从你仓库的 userpatches/u-boot/amlogic/s905lb-r3300l/)
+          UBOOT_DIR="${{ github.workspace }}/userpatches/u-boot/amlogic/s905lb-r3300l"
+          if [ -d "$UBOOT_DIR" ] && [ "$(ls -A $UBOOT_DIR)" ]; then
+            sudo cp -a $UBOOT_DIR/* /mnt/boot/
+            echo "✅ 自定义 U-Boot 已注入"
+          else
+            echo "⚠️ 未找到预编译 U-Boot，镜像可能无法启动"
+          fi
 
-      - name: 收集镜像并上传
+          # 创建 extlinux.conf
+          sudo mkdir -p /mnt/boot/extlinux
+          sudo tee /mnt/boot/extlinux/extlinux.conf > /dev/null << 'EOF'
+          LABEL Armbian
+          LINUX /vmlinuz-5.15.y
+          INITRD /uInitrd
+          FDT /dtb/amlogic/meson-gxl-s905x-p212.dtb
+          APPEND root=UUID=00000000-0000-0000-0000-000000000000 rootflags=data=writeback rw rootfstype=ext4 console=ttyAML0,115200n8 no_console_suspend consoleblank=0 fsck.fix=yes fsck.repair=yes net.ifnames=0
+          EOF
+
+          # 卸载镜像
+          sudo umount /mnt/boot /mnt/root
+          sudo losetup -d "$LOOP_DEV"
+
+          echo "✅ 镜像组装完成"
+
+      - name: 压缩并上传
         run: |
-          mkdir -p output-final
-          cp output/images/*.img.xz output-final/ 2>/dev/null || true
-          cp output/images/*.img.gz output-final/ 2>/dev/null || true
-          echo "✅ 镜像已收集"
+          xz -T0 final.img
+          TODAY=$(date +"%Y%m%d")
+          FINAL_NAME="Armbian_${{ inputs.armbian_release }}_r3300l_${{ inputs.kernel_branch }}_${TODAY}.img.xz"
+          mv final.img.xz "$FINAL_NAME"
+          echo "packaged_image=$FINAL_NAME" >> $GITHUB_ENV
 
       - name: 上传到 Release
         uses: ncipollo/release-action@main
         with:
           tag: "Armbian-${{ inputs.armbian_release }}-r3300l-${{ inputs.kernel_branch }}"
-          artifacts: "output-final/*.img.*"
+          artifacts: ${{ env.packaged_image }}
           allowUpdates: true
           token: ${{ secrets.GITHUB_TOKEN }}
           body: |
-            📦 Armbian (自定义 U-Boot + DTB)
-            - 设备: R3300L
+            📦 完全自主构建 Armbian
             - 内核: unifreq/linux-${{ inputs.kernel_branch }}
             - 系统: ${{ inputs.armbian_release }}
+            - 引导: 自定义 U-Boot
+            - DTB: meson-gxl-s905x-p212.dtb
