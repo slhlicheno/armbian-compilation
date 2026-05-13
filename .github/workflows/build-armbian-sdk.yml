@@ -1,4 +1,4 @@
-name: Build Armbian (Self-Compiled Kernel)
+name: Build Armbian (My Kernel + Self Assembly)
 
 on:
   workflow_dispatch:
@@ -13,7 +13,7 @@ on:
           - trixie
           - noble
       kernel_version:
-        description: "内核版本 (从 unifreq 源码编译)"
+        description: "内核版本"
         required: true
         type: choice
         default: "5.15.y"
@@ -29,48 +29,42 @@ jobs:
       - name: 检出你的仓库 (获取 DTB 和 U-Boot)
         uses: actions/checkout@v4
 
-      - name: 安装编译和打包依赖
+      - name: 安装依赖
         run: |
           sudo apt-get update
-          sudo apt-get install -y \
-            build-essential flex bison libssl-dev bc kmod cpio \
-            gcc-aarch64-linux-gnu \
-            xz-utils wget curl \
-            debootstrap
+          sudo apt-get install -y xz-utils wget curl jq debootstrap
 
-      # ================= 1. 从源码编译内核 =================
-      - name: 克隆内核源码 (unifreq)
+      # ====== 1. 从你自己的 kernel 仓库下载内核包 ======
+      - name: 下载自建内核包
         run: |
           KVER="${{ inputs.kernel_version }}"
-          # 仓库名就是 linux-5.15.y 等，分支统一为 main
-          REPO="https://github.com/unifreq/linux-${KVER}"
-          echo "Cloning kernel source from ${REPO} (branch: main)"
-          git clone --depth=1 --branch=main "${REPO}" linux-kernel
+          API_URL="https://api.github.com/repos/slhlicheno/kernel/releases/tags/kernel_stable"
+          ASSETS=$(curl -s "$API_URL" | jq '.assets')
+          SEARCH_VER="${KVER%.y}"
+          PACKAGE_URL=$(echo "$ASSETS" | jq -r --arg VER "$SEARCH_VER" \
+            '.[] | select(.name | startswith($VER) and endswith(".tar.gz") and (contains("deb") | not)) | .browser_download_url' \
+            | sort -V | tail -1)
 
-      - name: 编译内核
-        run: |
-          cd linux-kernel
-          # 尝试从 ophub 获取一个适用于 Amlogic 设备的默认内核配置
-          curl -fsSL "https://raw.githubusercontent.com/ophub/amlogic-s9xxx-armbian/main/build-armbian/armbian-files/platform-files/amlogic/bootfs/boot/config-${{ inputs.kernel_version }}" -o .config 2>/dev/null || true
-          if [ ! -s .config ]; then
-            echo "使用默认 arm64 defconfig"
-            make ARCH=arm64 defconfig
+          if [ -z "$PACKAGE_URL" ]; then
+            echo "❌ 在你仓库中未找到 ${KVER} 内核包"
+            exit 1
           fi
-          make ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- olddefconfig
-          make ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- -j$(nproc) Image modules dtbs
-          echo "✅ 内核编译完成"
 
-      # ================= 2. 自建根文件系统 =================
-      - name: 构建根文件系统 (debootstrap)
+          curl -L -o kernel.tar.gz "$PACKAGE_URL"
+          mkdir -p kernel-tree
+          tar -xzf kernel.tar.gz -C kernel-tree
+          echo "✅ 内核包下载完成"
+
+      # ====== 2. 自建 rootfs ======
+      - name: 构建根文件系统
         run: |
           sudo debootstrap --arch=arm64 ${{ inputs.armbian_release }} /tmp/rootfs http://deb.debian.org/debian
           echo "r3300l" | sudo tee /tmp/rootfs/etc/hostname
           echo "root:1234" | sudo chroot /tmp/rootfs /usr/sbin/chpasswd
 
-      # ================= 3. 组装最终镜像 =================
+      # ====== 3. 组装镜像 ======
       - name: 创建并组装镜像
         run: |
-          # 创建 4GB 空白镜像
           dd if=/dev/zero of=final.img bs=1M count=4096
           sudo parted final.img --script mklabel msdos
           sudo parted final.img --script mkpart primary fat32 1 256
@@ -85,35 +79,30 @@ jobs:
           sudo mount "${LOOP_DEV}p1" /mnt/boot
           sudo mount "${LOOP_DEV}p2" /mnt/root
 
-          # 复制根文件系统
           sudo cp -a /tmp/rootfs/* /mnt/root/
 
-          # 安装内核模块到 rootfs
-          cd linux-kernel
-          sudo make ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- INSTALL_MOD_PATH=/mnt/root modules_install
-
-          # 复制内核镜像到 boot 分区
-          sudo cp arch/arm64/boot/Image /mnt/boot/vmlinuz-${{ inputs.kernel_version }}
-          sudo ln -sf /mnt/boot/vmlinuz-${{ inputs.kernel_version }} /mnt/boot/zImage 2>/dev/null || true
-
-          # 复制设备树文件
-          sudo mkdir -p /mnt/boot/dtb/amlogic
-          # 优先使用你仓库里的自定义 DTB，否则使用内核编译出的
-          CUSTOM_DTB="${{ github.workspace }}/userpatches/overlay/boot/dtb/amlogic/s905lb-r3300l/meson-gxl-s905x-p212.dtb"
-          if [ -f "$CUSTOM_DTB" ]; then
-            sudo cp "$CUSTOM_DTB" /mnt/boot/dtb/amlogic/
-            echo "✅ 自定义 DTB 已注入"
-          else
-            sudo cp arch/arm64/boot/dts/amlogic/meson-gxl-s905x-p212.dtb /mnt/boot/dtb/amlogic/ 2>/dev/null || echo "⚠️ 未找到 DTB"
+          # 从内核包复制文件
+          if [ -d kernel-tree/boot ]; then
+            sudo cp -a kernel-tree/boot/* /mnt/boot/
+          fi
+          if [ -d kernel-tree/lib/modules ]; then
+            sudo cp -a kernel-tree/lib/modules/* /mnt/root/lib/modules/
+          fi
+          if [ -d kernel-tree/usr ]; then
+            sudo cp -a kernel-tree/usr/* /mnt/root/usr/
           fi
 
-          # 注入 U-Boot (从你仓库 userpatches/u-boot/amlogic/s905lb-r3300l/)
+          # 注入你的 DTB
+          CUSTOM_DTB="${{ github.workspace }}/userpatches/overlay/boot/dtb/amlogic/s905lb-r3300l/meson-gxl-s905x-p212.dtb"
+          if [ -f "$CUSTOM_DTB" ]; then
+            sudo mkdir -p /mnt/boot/dtb/amlogic
+            sudo cp "$CUSTOM_DTB" /mnt/boot/dtb/amlogic/
+          fi
+
+          # 注入你的 U-Boot
           UBOOT_DIR="${{ github.workspace }}/userpatches/u-boot/amlogic/s905lb-r3300l"
           if [ -d "$UBOOT_DIR" ] && [ "$(ls -A $UBOOT_DIR)" ]; then
             sudo cp -a $UBOOT_DIR/* /mnt/boot/
-            echo "✅ 自定义 U-Boot 已注入"
-          else
-            echo "⚠️ 未找到预编译 U-Boot"
           fi
 
           # 创建 extlinux.conf
@@ -126,13 +115,11 @@ jobs:
           APPEND root=UUID=00000000-0000-0000-0000-000000000000 rootflags=data=writeback rw rootfstype=ext4 console=ttyAML0,115200n8 no_console_suspend consoleblank=0 fsck.fix=yes fsck.repair=yes net.ifnames=0
           EOF
 
-          # 卸载镜像
           sudo umount /mnt/boot /mnt/root
           sudo losetup -d "$LOOP_DEV"
-          echo "✅ 镜像组装完成"
 
-      # ================= 4. 压缩并上传 =================
-      - name: 压缩并上传到 Release
+      # ====== 4. 上传 ======
+      - name: 压缩并上传
         run: |
           xz -T0 final.img
           TODAY=$(date +"%Y%m%d")
@@ -148,8 +135,8 @@ jobs:
           allowUpdates: true
           token: ${{ secrets.GITHUB_TOKEN }}
           body: |
-            📦 完全自主构建 Armbian (自编译内核)
-            - 内核: unifreq/linux-${{ inputs.kernel_version }} (main 分支)
+            📦 完全自主 Armbian
+            - 内核: 自建仓库 ${{ inputs.kernel_version }}
             - 系统: ${{ inputs.armbian_release }}
             - 引导: 自定义 U-Boot
             - DTB: meson-gxl-s905x-p212.dtb
