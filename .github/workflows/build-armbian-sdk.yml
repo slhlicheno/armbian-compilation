@@ -34,7 +34,6 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y xz-utils wget curl jq debootstrap qemu-user-static
 
-      # ⚡ QEMU 支持（必须）
       - name: 配置 QEMU 多架构支持
         run: |
           sudo modprobe binfmt_misc 2>/dev/null || true
@@ -46,7 +45,6 @@ jobs:
             echo "✅ ARM64 binfmt 已存在"
           fi
 
-      # ====== 1. 从你自己的 kernel 仓库下载内核包 ======
       - name: 下载自建内核包
         run: |
           KVER="${{ inputs.kernel_version }}"
@@ -67,14 +65,12 @@ jobs:
           tar -xzf kernel.tar.gz -C kernel-tree
           echo "✅ 内核包下载完成"
 
-      # ====== 2. 自建 rootfs ======
       - name: 构建根文件系统
         run: |
           sudo debootstrap --arch=arm64 ${{ inputs.armbian_release }} /tmp/rootfs http://deb.debian.org/debian
           echo "r3300l" | sudo tee /tmp/rootfs/etc/hostname
           echo "root:1234" | sudo chroot /tmp/rootfs /usr/sbin/chpasswd
 
-      # ====== 3. 组装镜像 ======
       - name: 创建并组装镜像
         run: |
           dd if=/dev/zero of=final.img bs=1M count=4096
@@ -93,7 +89,6 @@ jobs:
 
           sudo cp -a /tmp/rootfs/* /mnt/root/
 
-          # 从内核包复制文件
           if [ -d kernel-tree/boot ]; then
             sudo cp -a kernel-tree/boot/* /mnt/boot/
           fi
@@ -104,20 +99,19 @@ jobs:
             sudo cp -a kernel-tree/usr/* /mnt/root/usr/
           fi
 
-          # 注入你的 DTB
           CUSTOM_DTB="${{ github.workspace }}/userpatches/overlay/boot/dtb/amlogic/s905lb-r3300l/meson-gxl-s905x-p212.dtb"
           if [ -f "$CUSTOM_DTB" ]; then
             sudo mkdir -p /mnt/boot/dtb/amlogic
             sudo cp "$CUSTOM_DTB" /mnt/boot/dtb/amlogic/
           fi
 
-          # 注入你的 U-Boot
           UBOOT_DIR="${{ github.workspace }}/userpatches/u-boot/amlogic/s905lb-r3300l"
           if [ -d "$UBOOT_DIR" ] && [ "$(ls -A $UBOOT_DIR)" ]; then
-            sudo cp -a $UBOOT_DIR/* /mnt/boot/
+            # 修复权限错误：FAT32 分区不能保留 Linux 权限
+            sudo cp -r --no-preserve=all $UBOOT_DIR/* /mnt/boot/
+            echo "✅ 自定义 U-Boot 已注入"
           fi
 
-          # 创建 extlinux.conf
           sudo mkdir -p /mnt/boot/extlinux
           sudo tee /mnt/boot/extlinux/extlinux.conf > /dev/null << 'EOF'
           LABEL Armbian
@@ -130,7 +124,6 @@ jobs:
           sudo umount /mnt/boot /mnt/root
           sudo losetup -d "$LOOP_DEV"
 
-      # ====== 4. 上传 ======
       - name: 压缩并上传
         run: |
           xz -T0 final.img
