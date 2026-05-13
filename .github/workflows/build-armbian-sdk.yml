@@ -32,7 +32,19 @@ jobs:
       - name: 安装依赖
         run: |
           sudo apt-get update
-          sudo apt-get install -y xz-utils wget curl jq debootstrap
+          sudo apt-get install -y xz-utils wget curl jq debootstrap qemu-user-static
+
+      # ⚡ QEMU 支持（必须）
+      - name: 配置 QEMU 多架构支持
+        run: |
+          sudo modprobe binfmt_misc 2>/dev/null || true
+          sudo mount -t binfmt_misc binfmt_misc /proc/sys/fs/binfmt_misc 2>/dev/null || true
+          if [ ! -f /proc/sys/fs/binfmt_misc/qemu-aarch64 ]; then
+            echo ':qemu-aarch64:M::\x7fELF\x02\x01\x01\x00\x00\x00\x00\x00\x00\x00\x00\x00\x02\x00\xb7\x00:\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xfe\xff\xff\xff:/usr/bin/qemu-aarch64-static:F' | sudo tee /proc/sys/fs/binfmt_misc/register
+            echo "✅ ARM64 binfmt 已注册"
+          else
+            echo "✅ ARM64 binfmt 已存在"
+          fi
 
       # ====== 1. 从你自己的 kernel 仓库下载内核包 ======
       - name: 下载自建内核包
